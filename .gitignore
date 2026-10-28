@@ -36,3 +36,6 @@ artifacts/
 # Editor / misc
 *.swp
 *~
+
+# Release artifacts (attach to GitHub Releases instead of committing)
+release/
