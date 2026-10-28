@@ -43,7 +43,11 @@ jobs:
         run: swift test
 
       - name: 打包 unsigned PCBuds.app
-        run: Scripts/make_app.sh --release
+        # CI 没有开发者证书, 固定 ad-hoc 签名; 本地出包用 Scripts/make_dmg.sh。
+        run: Scripts/make_app.sh --release --sign -
+
+      - name: 打包 DMG
+        run: Scripts/make_dmg.sh --ad-hoc
 
       - name: 收集产物
         run: |
@@ -53,12 +57,14 @@ jobs:
             exit 1
           fi
           ditto -c -k --keepParent build/PCBuds.app PCBuds-app.zip
-          ls -lh PCBuds-app.zip
+          ls -lh PCBuds-app.zip release/*.dmg
 
       - name: 上传 .app 产物
         uses: actions/upload-artifact@v4
         with:
           name: PCBuds-app
-          path: PCBuds-app.zip
+          path: |
+            PCBuds-app.zip
+            release/*.dmg
           if-no-files-found: error
           retention-days: 14
