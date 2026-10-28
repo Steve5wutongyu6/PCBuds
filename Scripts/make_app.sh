@@ -4,16 +4,33 @@
 #   bash Scripts/make_app.sh            # release build (the CI configuration)
 #   bash Scripts/make_app.sh --debug    # debug build, for local testing
 #
-# The bundle is ad-hoc signed. macOS anchors TCC grants (Accessibility, Bluetooth) to the
-# signature, so every build of this script keeps the same designated requirement and the
-# grants survive a rebuild in place.
+# Signing identity, in order of preference:
+#   $CODESIGN_IDENTITY                               (what the release script passes)
+#   "Apple Development: $PCBuds_SIGNING*"             (a developer certificate in the keychain)
+#   ad-hoc (-)                                       (CI, and any machine without a certificate)
+#
+# macOS anchors TCC grants (Accessibility, Bluetooth) to the signature. Ad-hoc rebuilds keep the
+# same requirement by path; a certificate keeps it stable even when the app moves.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 CONFIGURATION=release
-if [[ "${1:-}" == "--debug" ]]; then
-    CONFIGURATION=debug
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) CONFIGURATION=debug ;;
+        --sign) CODESIGN_IDENTITY="${2:?--sign needs an identity}"; shift ;;
+        *) echo "make_app.sh: unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
+    CODESIGN_IDENTITY="$("${SECURITY:-/usr/bin/security}" find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' '/Apple Development: steve5wutongyu6@163.com/ { print $2; exit }')"
+fi
+if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
+    CODESIGN_IDENTITY=-
 fi
 
 APP_NAME=PCBuds
@@ -44,8 +61,14 @@ fi
 
 /usr/bin/plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
 
-echo "==> Signing (ad-hoc)"
-/usr/bin/codesign --force --sign - --timestamp=none --options runtime "$APP_BUNDLE" >/dev/null
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+    echo "==> Signing (ad-hoc)"
+    /usr/bin/codesign --force --sign - --timestamp=none --options runtime "$APP_BUNDLE" >/dev/null
+else
+    echo "==> Signing ($CODESIGN_IDENTITY)"
+    /usr/bin/codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none --options runtime \
+        "$APP_BUNDLE" >/dev/null
+fi
 
 echo "==> Verifying"
 /usr/bin/codesign --verify --strict "$APP_BUNDLE"
