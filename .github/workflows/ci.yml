@@ -15,9 +15,10 @@ concurrency:
 
 jobs:
   build:
-    # macos-26 镜像自带 Xcode 27 / macOS 27 SDK, 与项目 27.0 的部署目标匹配。
-    # 不要改用 macos-latest: 它可能仍指向更旧的镜像, 导致部署目标不受支持。
-    runs-on: macos-26
+    # xcode-27 镜像以 macOS 27 为基础并自带 Xcode 27 / Swift 6.4, 与 Package.swift 的
+    # 工具版本和 27.0 部署目标匹配。macos-26 仍是 Xcode 26 + Swift 6.3, 编译会直接失败;
+    # 不要改用 macos-latest, 它指向的镜像更旧。
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
