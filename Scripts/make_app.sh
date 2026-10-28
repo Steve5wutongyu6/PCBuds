@@ -1,8 +1,10 @@
 #!/bin/bash
 # Assembles build/PCBuds.app from the SwiftPM release build.
 #
-#   bash Scripts/make_app.sh            # release build (the CI configuration)
-#   bash Scripts/make_app.sh --debug    # debug build, for local testing
+#   bash Scripts/make_app.sh              # release build (the CI configuration)
+#   bash Scripts/make_app.sh --release    # the same, spelled out for CI
+#   bash Scripts/make_app.sh --debug      # debug build, for local testing
+#   bash Scripts/make_app.sh --sign "Apple Development: …"   # sign with a certificate
 #
 # Signing identity, in order of preference:
 #   $CODESIGN_IDENTITY                               (what the release script passes)
@@ -19,6 +21,7 @@ CONFIGURATION=release
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --debug) CONFIGURATION=debug ;;
+        --release) CONFIGURATION=release ;;
         --sign) CODESIGN_IDENTITY="${2:?--sign needs an identity}"; shift ;;
         *) echo "make_app.sh: unknown option $1" >&2; exit 2 ;;
     esac
