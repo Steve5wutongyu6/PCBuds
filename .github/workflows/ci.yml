@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macos-26 镜像自带 Xcode 27 / macOS 27 SDK, 与项目 27.0 的部署目标匹配。
+    # 不要改用 macos-latest: 它可能仍指向更旧的镜像, 导致部署目标不受支持。
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          echo "SDK: $(xcrun --sdk macosx --show-sdk-version)"
+
+      - name: 检查 release 代码中没有日志调用
+        run: Scripts/check-no-logging.sh
+
+      - name: 编译 (release)
+        run: swift build -c release
+
+      # 干净构建: 陈旧的 .build 中间产物曾导致测试在错误的平台上运行(macos14.0)。
+      - name: 清理构建缓存
+        run: rm -rf .build
+
+      - name: 单元测试
+        run: swift test
+
+      - name: 打包 unsigned PCBuds.app
+        run: Scripts/make_app.sh --release
+
+      - name: 收集产物
+        run: |
+          set -euo pipefail
+          if [ ! -d build/PCBuds.app ]; then
+            echo "缺少 build/PCBuds.app" >&2
+            exit 1
+          fi
+          ditto -c -k --keepParent build/PCBuds.app PCBuds-app.zip
+          ls -lh PCBuds-app.zip
+
+      - name: 上传 .app 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCBuds-app
+          path: PCBuds-app.zip
+          if-no-files-found: error
+          retention-days: 14
