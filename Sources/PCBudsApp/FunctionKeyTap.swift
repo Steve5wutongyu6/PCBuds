@@ -5,24 +5,24 @@ import CoreGraphics
 ///
 /// Carbon hotkeys can observe F5 but never suppress it, so the app has to inspect the event
 /// stream itself. The tap runs on a private thread with its own run loop: a busy main thread
-/// then never trips the tap watchdog, and a tap that does get disabled by a timeout is
-/// re-enabled silently instead of counting against the app's Accessibility grant.
+/// then never trips the tap watchdog, and a tap the system switches off is rebuilt on that same
+/// thread instead of counting against the app's Accessibility grant.
 ///
-/// Key codes are matched instead of key characters, so F5 stays F5 on every keyboard layout,
-/// and the F5 key-up is consumed too so the key cannot linger half-pressed in other apps.
+/// The tap is created **on its own thread**, never by the caller: CGEvent.tapCreate has to be
+/// installed on the run loop that will service it, and that run loop only exists once the thread
+/// is running. Building it from the caller raced the thread's start-up, and a lost race looked
+/// exactly like a missing Accessibility grant — the app raised its permission window on a machine
+/// where access had already been granted. Callers therefore only *ask* for a tap; "isCapturing"
+/// reports what the thread actually built.
+///
+/// Key codes are matched instead of key characters, so F5 stays F5 on every keyboard layout, and
+/// the F5 key-up is consumed too so the key cannot linger half-pressed in other apps.
 final class FunctionKeyTap: @unchecked Sendable {
-    /// The event kinds a successful tap captures. A tap that captures nothing could not be
-    /// created — which is what macOS reports for an app without the Accessibility grant.
-    struct Capability: OptionSet, Sendable {
-        let rawValue: Int
-
-        static let keyDown = Capability(rawValue: 1 << 0)
-        static let keyUp = Capability(rawValue: 1 << 1)
-        static let both: Capability = [.keyDown, .keyUp]
-    }
-
     /// Virtual key code of F5 (0x60).
     static let keyCode: Int64 = 96
+
+    /// How long each run-loop pass waits before the tap is re-checked.
+    private static let selfHealInterval: CFTimeInterval = 2
 
     /// Called on the tap thread for every F5 press; the handler must bounce to the main thread.
     var onPress: (() -> Void)?
@@ -34,21 +34,23 @@ final class FunctionKeyTap: @unchecked Sendable {
     private var tap: CFMachPort?
     private var tapSource: CFRunLoopSource?
     private var tapIsActive = false
-    private var generation = 0
+    /// Set by callers, acted on by the tap thread.
+    private var wantsTap = false
     private var shouldExit = false
 
-    /// Whether F5 is being captured right now.
-    var isActive: Bool {
+    /// Whether F5 is being captured right now. Safe to read from any thread.
+    var isCapturing: Bool {
         lock.withLock { tapIsActive }
     }
 
     // MARK: - Lifecycle
 
-    /// Starts the tap thread. Events are only captured once `startTap()` succeeds.
+    /// Starts the tap thread. Capture begins once the thread has built its tap.
     func start() {
         lock.withLock {
             guard thread == nil else { return }
             shouldExit = false
+            wantsTap = true
             let thread = Thread { [self] in run() }
             thread.name = "PCBuds.key-tap"
             thread.qualityOfService = .userInteractive
@@ -62,20 +64,61 @@ final class FunctionKeyTap: @unchecked Sendable {
     func stop() {
         lock.withLock {
             shouldExit = true
-            wakeLocked()
+            wantsTap = false
+            if let runLoop { CFRunLoopStop(runLoop) }
         }
     }
 
     // MARK: - Tap control
 
-    /// Installs a fresh tap and returns what it captures. An empty result means the tap could
-    /// not be created — the usual cause is a missing Accessibility grant.
-    @discardableResult
-    func startTap() -> Capability {
-        let request: (generation: Int, active: Bool) = lock.withLock { (generation, tapIsActive) }
-        guard !request.active else { return .both }
+    /// Asks for a fresh tap. Returns immediately; the thread builds it on its own run loop and
+    /// "isCapturing" reports the result. An existing tap is replaced, because a tap left running
+    /// across sleep or a settings change can keep an outdated event filter.
+    func rebuild() {
+        lock.withLock {
+            wantsTap = true
+            tearDownTapLocked()
+            if let runLoop { CFRunLoopWakeUp(runLoop) }
+        }
+    }
 
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
+    // MARK: - Tap thread
+
+    private func run() {
+        let keepAlive = Self.makeKeepAliveSource()
+        let loop = CFRunLoopGetCurrent()
+        lock.withLock {
+            runLoop = loop
+            self.keepAlive = keepAlive
+        }
+        if let keepAlive {
+            CFRunLoopAddSource(loop, keepAlive, .commonModes)
+        }
+
+        while !lock.withLock({ shouldExit }) {
+            installTapIfWanted()
+            // A bounded pass keeps the self-heal independent of incoming events: the system can
+            // switch a tap off without the process being told.
+            _ = CFRunLoopRunInMode(.defaultMode, Self.selfHealInterval, true)
+            verifyTap()
+        }
+
+        lock.withLock {
+            tearDownTapLocked()
+            if let keepAlive { CFRunLoopSourceInvalidate(keepAlive) }
+            self.keepAlive = nil
+            runLoop = nil
+            thread = nil
+        }
+    }
+
+    /// Builds the tap when one is wanted and none is running. Runs on the tap thread.
+    private func installTapIfWanted() {
+        let wanted = lock.withLock { wantsTap && !tapIsActive && !shouldExit }
+        guard wanted else { return }
+
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+            | CGEventMask(1 << CGEventType.keyUp.rawValue)
         let callback: CGEventTapCallBack = { _, _, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
             let tap = Unmanaged<FunctionKeyTap>.fromOpaque(userInfo).takeUnretainedValue()
@@ -88,77 +131,55 @@ final class FunctionKeyTap: @unchecked Sendable {
             eventsOfInterest: mask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else {
-            return []
+        ) else {
+            // No grant, or the event system refuses right now. The next pass tries again.
+            return
+        }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else {
+            CFMachPortInvalidate(port)
+            return
         }
 
         let installed = lock.withLock { () -> Bool in
-            guard request.generation == generation, !tapIsActive, let runLoop else { return false }
+            guard wantsTap, !tapIsActive, !shouldExit, let runLoop else { return false }
             tap = port
             tapSource = source
             tapIsActive = true
             CFRunLoopAddSource(runLoop, source, .commonModes)
             return true
         }
-        guard installed else { return [] }
-
+        guard installed else {
+            CFMachPortInvalidate(port)
+            return
+        }
         CGEvent.tapEnable(tap: port, enable: true)
-        return CGEvent.tapIsEnabled(tap: port) ? .both : []
-    }
-
-    /// Discards the current tap. A tap left running after sleep or a settings change can keep
-    /// an outdated event filter, so it is always replaced rather than re-enabled.
-    func stopTap() {
-        let runLoop: CFRunLoop? = lock.withLock {
-            generation &+= 1
-            let loop = self.runLoop
-            removeTapLocked()
-            return loop
-        }
-        // Releasing the port only takes effect on the tap thread's next pass.
-        if let runLoop { CFRunLoopWakeUp(runLoop) }
-    }
-
-    @discardableResult
-    func restartTap() -> Capability {
-        stopTap()
-        return startTap()
-    }
-
-    // MARK: - Tap thread
-
-    private func run() {
-        let keepAlive = Self.makeKeepAliveSource()
-        lock.withLock {
-            runLoop = CFRunLoopGetCurrent()
-            self.keepAlive = keepAlive
-        }
-        if let keepAlive, let runLoop = CFRunLoopGetCurrent() as CFRunLoop? {
-            CFRunLoopAddSource(runLoop, keepAlive, .commonModes)
-        }
-
-        while !lock.withLock({ shouldExit }) {
-            _ = CFRunLoopRunInMode(.defaultMode, Date.distantFuture.timeIntervalSinceReferenceDate, true)
-        }
-
-        lock.withLock {
-            removeTapLocked()
-            if let keepAlive { CFRunLoopSourceInvalidate(keepAlive) }
-            self.keepAlive = nil
-            runLoop = nil
-            thread = nil
+        if !CGEvent.tapIsEnabled(tap: port) {
+            lock.withLock { tearDownTapLocked() }
         }
     }
 
-    private func wakeLocked() {
-        guard let runLoop else { return }
-        CFRunLoopStop(runLoop)
+    /// Replaces a tap the system switched off. Runs on the tap thread.
+    private func verifyTap() {
+        let state: (wanted: Bool, usable: Bool) = lock.withLock {
+            guard wantsTap else { return (false, false) }
+            let usable = tapIsActive && (tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false)
+            return (true, usable)
+        }
+        guard state.wanted else { return }
+        guard state.usable else {
+            lock.withLock { tearDownTapLocked() }
+            installTapIfWanted()
+            return
+        }
     }
 
-    private func removeTapLocked() {
-        guard tapIsActive else { return }
+    /// Removes the tap. The port is released on the thread that installed its run-loop source.
+    private func tearDownTapLocked() {
+        guard tapIsActive || tap != nil else { return }
         tapIsActive = false
-        if let tapSource, let runLoop { CFRunLoopRemoveSource(runLoop, tapSource, .commonModes) }
+        if let tapSource, let runLoop {
+            CFRunLoopRemoveSource(runLoop, tapSource, .commonModes)
+        }
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -188,9 +209,9 @@ final class FunctionKeyTap: @unchecked Sendable {
     private func handle(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         switch event.type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            // The system switched the tap off. Turn it back on in place — rebuilding the tap
-            // here would need another run-loop pass, and losing F5 for a moment is worse.
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            // Dropping the tap here and letting the thread rebuild is the only safe move:
+            // rebuilding from inside the callback deadlocks.
+            lock.withLock { tearDownTapLocked() }
             return Unmanaged.passUnretained(event)
 
         case .keyDown, .keyUp:

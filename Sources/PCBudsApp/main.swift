@@ -7,7 +7,8 @@ enum PCBudsAppMain {
         if SingleInstance.isAlreadyRunning() { SingleInstance.yieldToRunningCopy() }
 
         let application = NSApplication.shared
-        application.setActivationPolicy(.accessory)
+        // The app stays out of the Dock and the menu bar entirely: `Resources/Info.plist` ships
+        // `LSUIElement`, and forcing .accessory here would add nothing but a Dock-less agent.
         let delegate = PCBudsAppDelegate()
         application.delegate = delegate
         application.run()

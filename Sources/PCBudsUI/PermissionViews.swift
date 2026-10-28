@@ -3,9 +3,9 @@ import SwiftUI
 /// The one piece of foreground UI in PCBuds: shown only when a permission is missing, and
 /// closed the moment the permission arrives.
 ///
-/// Restrained by design — a heading naming the switch that has to be turned on, the exact
-/// path in System Settings, then the two actions. No hero icon, no subtitle restating the
-/// heading, no footer.
+/// Restrained by design — the permission's symbol, a heading naming the switch that has to be
+/// turned on, one rounded list with the path to it, then the two actions. No subtitle restating
+/// the heading, no footer.
 public struct PermissionView: View {
     /// Which system switch the window is asking about.
     public enum Kind: Sendable {
@@ -31,20 +31,44 @@ public struct PermissionView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 14) {
+            PermissionIcon(kind: kind)
             PermissionHeading(kind: kind)
-            PermissionPath(kind: kind, appName: appName)
-                .fixedSize(horizontal: false, vertical: true)
+            PermissionRoute(kind: kind, appName: appName)
             Spacer(minLength: 0)
             PermissionActions(onOpenSettings: onOpenSettings, onRetry: onRetry)
         }
-        .frame(maxWidth: 360)
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 24)
-        .fixedSize(horizontal: false, vertical: true)
+        .padding(.top, 8)
         .padding(.bottom, 20)
-        .frame(minWidth: 460, idealWidth: 460, maxWidth: .infinity)
-        .frame(height: 250, alignment: .top)
+        .frame(width: 460, height: 250, alignment: .top)
         .accessibilityElement(children: .contain)
+    }
+}
+
+extension PermissionView.Kind {
+    /// The SF Symbol that stands for the permission the window asks for.
+    var symbolName: String {
+        switch self {
+        case .accessibility: "accessibility"
+        case .bluetooth: "antenna.radiowaves.left.and.right"
+        }
+    }
+}
+
+// MARK: - Icon
+
+private struct PermissionIcon: View {
+    let kind: PermissionView.Kind
+
+    var body: some View {
+        Image(systemName: kind.symbolName)
+            .font(.system(size: 28, weight: .regular))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityHidden(true)
     }
 }
 
@@ -63,36 +87,42 @@ private struct PermissionHeading: View {
 
 // MARK: - Path in System Settings
 
-private struct PermissionPath: View {
+/// The whole route as one list: where to go, then what to turn on.
+private struct PermissionRoute: View {
     let kind: PermissionView.Kind
     let appName: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("系统设置 · 隐私与安全性")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Label {
-                Text(path)
-                    .font(.callout)
-                    .fixedSize(horizontal: false, vertical: true)
-            } icon: {
-                Image(systemName: "gearshape")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(Color(nsColor: .quaternarySystemFill), in: .rect(cornerRadius: 8))
+        VStack(alignment: .leading, spacing: 0) {
+            row(symbol: "gearshape", text: "系统设置 · 隐私与安全性")
+            Divider()
+                .padding(.leading, 28)
+            row(symbol: kind.symbolName, text: step)
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .quaternarySystemFill), in: .rect(cornerRadius: 10))
         .accessibilityElement(children: .combine)
     }
 
-    private var path: String {
+    private func row(symbol: String, text: String) -> some View {
+        Label {
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+        }
+        .labelStyle(.titleAndIcon)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 9)
+    }
+
+    private var step: String {
         switch kind {
-        case .accessibility:
-            "辅助功能 → 勾选「\(appName)」"
-        case .bluetooth:
-            "蓝牙 → 允许「\(appName)」"
+        case .accessibility: "辅助功能 → 勾选「\(appName)」"
+        case .bluetooth: "蓝牙 → 允许「\(appName)」"
         }
     }
 }

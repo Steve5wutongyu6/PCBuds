@@ -8,6 +8,9 @@ let package = Package(
     platforms: [.macOS(.v27)],
     products: [
         .library(name: "PCBudsKit", targets: ["PCBudsKit"]),
+        // Exposed so preview harnesses and future UI tests can render the permission window
+        // without launching the agent.
+        .library(name: "PCBudsUI", targets: ["PCBudsUI"]),
         .executable(name: "PCBuds", targets: ["PCBuds"]),
     ],
     targets: [
